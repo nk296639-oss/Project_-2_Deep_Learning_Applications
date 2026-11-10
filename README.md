@@ -450,3 +450,295 @@ The figure uses one correct prediction per DR grade plus 4 random errors (9 imag
 | `aptos_model.pt` | weights, class order, backbone, image size, flags |
 
 Fixed settings: `SEED = 42`, `IMG_SIZE = 224`, `CACHE_SIZE = 256`, `NEAR_DUP_THR = 0.10`, `TARGET_RECALL = 0.95`, `REFERABLE_MIN_GRADE = 2`. The operating threshold **t = 0.464 is not stored in the checkpoint**; record it separately before any use.
+
+
+# Week 7: Text and Multimodal AI
+
+Text tools (spam classifier, named-entity recognition, regular-expression fields, OCR, privacy masking) connected to my **Week 6 image model** (APTOS 2019 fundus photos, referable diabetic retinopathy) in one decision-support record.
+
+> **Decision support only.** Nothing here is validated clinically. A qualified human makes every decision. All patient names, numbers and notes in this project are invented.
+
+## Summary
+
+| Item | Result |
+|---|---|
+| Text classifier | SMS Spam Collection, **5,572** texts (747 spam, 13.4 %), macro-F1 **0.974** (word 1-2 grams) vs **0.982** (character 2-5 grams) |
+| Top positive (spam) features | call, txt, free, text, reply, uk, to, www, mobile, claim, stop, your |
+| Top negative (ham) features | my, me, ok, that, it, but, ll, gt, lt, can, what, da |
+| NER on my domain (diabetic eye-screening reports) | out-of-the-box F1 **0.667** -> with entity ruler **0.889** on the 5 held-out sentences (0.526 -> 1.000 on the 5 sentences the rules were written from) |
+| NER on the lab sentences | F1 **0.483** -> **0.839** |
+| Regex fields extracted | CNIC, mobile, amount, date, e-mail, invoice no.; domain: fundus file id, HbA1c, eye (OD/OS/OU), DR grade, MRN, age |
+| False positives tested | **7 negative tests, 0 false positives** (10 of 10 domain tests pass); 3 loose patterns shown and fixed |
+| OCR | CER on the 3 lab pairs: raw **0.062 / 0.059 / 0.143** (mean 0.088) -> **0.000** after correction rules; synthetic invoice 0.000 -> 0.000 (too clean to test the rules) |
+| Pipeline | image model + text evidence -> JSON record (example below) |
+| Privacy | CNIC, phone, e-mail (and MRN) masked **before** extraction and logging; leak check: 0 of 5 fragments found in the record |
+
+## Inputs
+
+| Input | Used for |
+|---|---|
+| SMS Spam Collection (`uciml/sms-spam-collection-dataset`, `spam.csv`, Latin-1) | Part 1 (spam classifier) |
+| spaCy `en_core_web_sm` (3.8.16) | NER |
+| `aptos_model.pt` (Week 6: ResNet18, 2 classes `non_referable` / `referable_DR`, 224 x 224, colour) | image evidence |
+| APTOS 2019 fundus photos (Week 6 mirror, original source: Kaggle competition *APTOS 2019 Blindness Detection*) | example photos |
+| EasyOCR (needs internet the first time) | invoice OCR |
+
+The licence of each Kaggle upload was not checked; check it and cite the original sources before reuse.
+
+---
+
+## 1. Text classifier: spam vs ham
+
+**Data.** 4,825 ham + 747 spam = 5,572 messages. Spam share $747/5572 = 0.134$, so an "always ham" model already scores $4825/5572 = 0.866$ accuracy; accuracy is therefore not used to compare models. Imbalance ratio $4825/747 = 6.46$.
+
+**Split.** 80 / 20, stratified, `random_state=42`: train 4,457 (598 spam), test 1,115 (149 spam, 966 ham).
+
+**Features and model.**
+
+$$tf'(t,d) = 1 + \ln tf(t,d), \qquad idf(t) = \ln\frac{1+N}{1+df(t)} + 1, \qquad \mathbf{x}_d = \frac{tf' \cdot idf}{\lVert tf' \cdot idf \rVert_2}$$
+
+$$p(\text{spam}\mid \mathbf{x}) = \frac{1}{1 + e^{-(\mathbf{w}^{\top}\mathbf{x} + b)}}$$
+
+Balanced class weights $w_c = N_{\text{train}} / (K\, n_c)$:
+
+$$w_{\text{ham}} = \frac{4457}{2 \times 3859} = 0.577, \qquad w_{\text{spam}} = \frac{4457}{2 \times 598} = 3.727$$
+
+### Word vs character model
+
+| Model | Features | Macro-F1 | Spam precision | Spam recall | Spam F1 | Errors (of 1,115) |
+|---|---|---|---|---|---|---|
+| Word 1-2 grams (`min_df=2`) | 12,128 | **0.974** | 0.979 | 0.933 | 0.955 | 13 |
+| Character 2-5 grams (`char_wb`) | 36,449 | **0.982** | 0.986 | 0.953 | 0.969 | 9 |
+
+**Working (word model).** Recall $0.933 = TP/149 \Rightarrow TP = 139$, $FN = 10$; precision $0.979 = 139/(139+FP) \Rightarrow FP = 3$; $TN = 963$.
+
+$$F1_{\text{spam}} = \frac{2 \times 139}{142 + 149} = 0.955, \quad F1_{\text{ham}} = 0.993, \quad \text{macro-F1} = \frac{0.955 + 0.993}{2} = 0.974$$
+
+**Working (character model).** $TP = 142$, $FN = 7$, $FP = 2$: $F1_{\text{spam}} = \frac{2 \times 142}{144 + 149} = 0.969$, macro-F1 $= \frac{0.969 + 0.995}{2} = 0.982$.
+
+**Reading the comparison.** The macro-F1 gap is $0.982 - 0.974 = 0.008$, i.e. $13 - 9 = 4$ messages ($0.36\,\%$ of the test set) on one split: too small to call a real difference. The case for characters is robustness: after padding, "prize" and "pr1ze" each give 18 character n-grams and share 6, so
+
+$$J = \frac{6}{18 + 18 - 6} = 0.20 \quad (\text{a word model sees an unseen token: overlap } 0).$$
+
+The cost is a vocabulary $36449/12128 = 3.0\times$ larger.
+
+### Top features (word model)
+
+A coefficient $w_j > 0$ multiplies the spam odds by $e^{w_j}$ per unit of feature value.
+
+| Direction | Terms |
+|---|---|
+| Spam-like | call, txt, free, text, reply, uk, **to**, www, mobile, claim, stop, **your** |
+| Ham-like | my, me, ok, that, it, but, ll, **gt**, **lt**, can, what, **da** |
+
+Most spam terms are real calls to action. Shortcut-like terms: *to* and *your* (function words), and the artefacts *gt* / *lt* (HTML escapes `&gt;`, `&lt;`) and *da* (a chat particle). The shortcut causes the false positive "Waiting for your call." with $p = 0.853$.
+
+### Robustness to spelling tricks (threshold 0.5)
+
+| Message | Expected | Word $p$ | Char $p$ |
+|---|---|---|---|
+| `W1N a FR33 pr1ze!! txt CLAIM now` | spam | 0.99 | 0.85 |
+| `kal milte hain, 5 baje` | ham | 0.19 | 0.12 |
+| `C0ngrats!! U w0n Rs 25000 pr1ze. Cl@im by txt 5588 now` | spam | 0.81 | 0.88 |
+| `Mubarak ho! Aap ne 50000 ka inaam jeeta hai, abhi 8000 par SMS karein` | spam | **0.32 (missed)** | 0.53 |
+| `Yaar meeting kal subah 9 baje hai, notes bhej dena` | ham | 0.13 | 0.12 |
+
+Neither model was trained on Roman Urdu, so these rows are untrained behaviour, not evidence; the character model passes the fourth row by only $0.53 - 0.50 = 0.03$.
+
+### Error analysis (word model, 13 errors)
+
+| Direction | Count | Share |
+|---|---|---|
+| False negatives (spam scored below 0.5) | 10 | $10/149 = 6.7\,\%$ of spam |
+| False positives (ham scored 0.5 or higher) | 3 | $3/966 = 0.31\,\%$ of ham |
+
+| Category (my judgement) | Count | Share of errors |
+|---|---|---|
+| Model error (fixable) | 8 | 62 % |
+| Genuinely ambiguous | 4 | 31 % |
+| Label error | 1 | 8 % |
+
+Error rate $13/1115 = 1.17\,\%$; counting only the 8 model errors, $8/1115 = 0.72\,\%$. Closest misses: $p = 0.4645$ ("Call me NOW" premium-number message) and $p = 0.4248$.
+
+---
+
+## 2. Named-entity recognition (NER)
+
+Scoring is by exact match of text **and** label:
+
+$$P = \frac{TP}{TP + FP}, \quad R = \frac{TP}{TP + FN}, \quad F1 = \frac{2\,TP}{\#\text{predicted} + \#\text{gold}}$$
+
+| Test set | Gold | Out of the box (P / R / F1) | With entity ruler (P / R / F1) |
+|---|---|---|---|
+| Lab sentences (6) | 16 | 0.538 / 0.438 / **0.483** | 0.867 / 0.812 / **0.839** |
+| My domain, sentences 1-5 (rules written from these) | 20 | 0.556 / 0.500 / **0.526** | 1.000 / 1.000 / **1.000** |
+| **My domain, sentences 6-10 (held out)** | 18 | 0.667 / 0.667 / **0.667** | 0.889 / 0.889 / **0.889** |
+
+**Working.**
+
+* Lab, before: $TP = 0.438 \times 16 = 7$, predicted $= 7/0.538 = 13$, $F1 = \frac{2 \times 7}{13 + 16} = \frac{14}{29} = 0.483$. After: $TP = 13$, predicted $= 15$, $F1 = \frac{26}{31} = 0.839$; gain $+0.356$ (the lecture, with its original names, reports $0.533 \to 0.875$).
+* Domain held-out, before: $TP = 12$, $F1 = \frac{24}{36} = 0.667$. After: $TP = 16$, $FP = FN = 2$, $F1 = \frac{32}{36} = 0.889$.
+* **Optimism gap:** $1.000 - 0.889 = 0.111$. The first number alone would overstate the rules.
+
+**Domain and rules.** Ten sentences imitating diabetic eye-screening reports. Rules: `MONEY` (`PKR` / `Rs.` + number), `DATE` (`dd/mm/yyyy`), `ORG` for PIMS, a "Capitalised words + Hospital / Society / Centre / Clinic / Institute / Bank" pattern, four cities, and a `strip_titles` step that removes `Dr.` / `Patient` from person spans.
+
+**What the rules did on the held-out set.** 12 of 18 entities were already correct before any rule (all 4 organisations, all 3 cities, 2 dates, 3 of 5 persons); the rules fixed 4 (the date `05/12/2026` and the amounts `PKR 12,500`, `PKR 24,000`, `Rs. 80,000`): $12 + 4 = 16 = TP$. So the held-out set barely tests the hospital-suffix pattern and the city list; the gain comes from the **format** rules.
+
+**Remaining errors:** two person names, *Amna Javed* (tagged `LOC`) and *Danish Akram* (tagged `ORG`); no rule covers open-class person names. With only $20 + 18 = 38$ gold entities a trained model is not possible; next step would be annotating a few hundred real report sentences.
+
+---
+
+## 3. Regex field extraction
+
+| Field | Pattern (case-insensitive, except where noted) |
+|---|---|
+| `cnic` | `\b\d{5}-\d{7}-\d\b` |
+| `mobile` | `(?:\+92[- ]?\|\b0)3\d{2}[- ]?\d{7}\b` |
+| `amount` | `\b(?:PKR\|Rs\.?)\s?([\d,]+(?:\.\d{1,2})?)` |
+| `date` | `\b\d{1,2}[/-]\d{1,2}[/-]\d{4}\b` |
+| `email` | `\b[\w.+-]+@[\w-]+(?:\.[\w-]+)+\b` |
+| `invoice` | `\b(?:Invoice\s+)?No\.?\s*(\d{3,})\b` |
+| `fundus_file` | `\b[0-9a-f]{12}\.(?:png\|jpe?g)\b` (APTOS `id_code`) |
+| `hba1c` | `\bHbA1c\s?(?:of\s\|[:=]\s?)?(\d{1,2}(?:\.\d)?)\s?%` (percent only) |
+| `eye` | `(?-i:\b(?:OD\|OS\|OU)\b)` (**case-sensitive**) |
+| `dr_grade` | `\bDR\s+grade\s?([0-4])\b` |
+| `mrn` | `\bMRN[- ]?\d{6,8}\b` |
+| `age` | `\baged?\s+(\d{1,2}\|1[01]\d)\b` |
+
+**Tests.** Lab: 5 of 5 pass (3 positive, 2 negative). Domain: **10 of 10 pass**, of which **7 are negative tests** (must return nothing):
+
+| Negative test | Why it must not match |
+|---|---|
+| `Take the tablet od for one month` | lowercase *od* = once daily, not the right eye |
+| `Grade 3 students had an HbA1c test` | "grade" without "DR"; no value |
+| `HbA1c 53 mmol/mol` | IFCC units, not a percentage |
+| `Photo abcdefabcdef12.png and 12345.png` | 14 hex characters / too short for an id |
+| `BP 140/90 mmHg and glucose 7 mmol/L` | not a date |
+| `MRN 12 was seen in age 2026` | too few digits; not an age |
+| `Doctors 500 mg twice daily` | "Rs" inside "Doctors" is not an amount |
+
+**False positives found and fixed** (probe: `Doctors 500 mg; HbA1c 53 mmol/mol; Grade 3 students`):
+
+| Pattern | Loose version returns | Fixed version returns |
+|---|---|---|
+| `amount` without `\b` | `500` | none |
+| `hba1c` without `%` | `53` | none |
+| `dr_grade` without "DR" | `3` | none |
+
+Each loose pattern gave exactly 1 false hit; the fixes remove it and keep all 3 positive tests. **Known limit:** an uppercase prescription abbreviation (`metformin OD`) would still match `eye`.
+
+---
+
+## 4. OCR and correction rules
+
+$$d_{i,j} = \min\big(d_{i-1,j} + 1,\; d_{i,j-1} + 1,\; d_{i-1,j-1} + [a_i \ne b_j]\big), \qquad \text{CER} = \frac{S + D + I}{N_{\text{ref}}}$$
+
+`fix_ocr` turns a letter `O` into `0` only when it touches a digit, `l`/`I` between digits into `1`, and `N0.` into `No.`.
+
+| Reference | OCR output | Edits | $N_{\text{ref}}$ | CER raw | CER after rules |
+|---|---|---|---|---|---|
+| `Invoice No. 4417` | `Invoice N0. 4417` | 1 | 16 | $1/16 = 0.062$ | 0.000 |
+| `Total: PKR 12,500` | `Total: PKR 12,5O0` | 1 | 17 | $1/17 = 0.059$ | 0.000 |
+| `Due 30/09/2026` | `Due 3O/09/2O26` | 2 | 14 | $2/14 = 0.143$ | 0.000 |
+
+Mean CER of the three pairs $= (0.062 + 0.059 + 0.143)/3 = 0.088$; pooled $= 4/47 = 0.085$; both fall to $0.000$.
+
+**Synthetic invoice (EasyOCR).** Reference length 124 characters; CER raw $0/124 = 0.000$, after rules $0.000$; field accuracy over `mobile`, `amount`, `date`, `invoice` $4/4 = 1.00 \to 1.00$. The image is clean rendered text, so it cannot show the benefit of the rules; the expected gain has to be measured on real scans with hand-typed reference text.
+
+**CER alone misleads.** `PKR 4,5O0` has CER $1/9 = 0.111$, yet the amount is wrong (field accuracy for it is 0).
+
+**Limit of the repair rule (checked by running it).** `PKR 4,5OO` (two adjacent letters, CER $2/9 = 0.222$) is returned unchanged, because the second `O` is preceded by an `O`, not a digit. A single `O` (`PKR 4,5O0`) is repaired.
+
+---
+
+## 5. Multimodal pipeline: image model + text evidence -> JSON record
+
+```
+ photo ──► Week 6 ResNet18 ──► P(referable_DR) ─────────────┐
+                                                             ├─► decision + flag ─► JSON record
+ note ──► mask_pii ──► NER + regex + urgent terms ──────────┘
+          (CNIC, phone, e-mail, MRN)
+```
+
+**Image evidence.** $p_c = e^{z_c}/\sum_k e^{z_k}$; photos are resized to $256 \times 256$ (as in Week 6 caching), then $224 \times 224$. **Operating point** $t = 0.464$, chosen in Week 6 on the *validation* set as the highest threshold with recall $\ge 0.95$. In logit form $z_{\text{ref}} - z_{\text{non}} \ge \ln\frac{0.464}{0.536} = -0.144$: a photo is referred even if the model is slightly more confident of "non-referable". Week 6 test split at this threshold: sensitivity $355/367 = 0.967$, specificity $107/139 = 0.770$.
+
+**Text evidence.** Domain NER entities, regex fields and urgent symptom terms (blurred vision, floaters, dark spots, vision loss, flashes of light, eye pain, ...) matched at the start of a word.
+
+**Decision rule.** With $I = [p_{\text{referable}} \ge t]$ and $U = [\text{urgent terms found}]$:
+
+$$\text{REFER} = I \lor U, \qquad \text{FLAG for human review} = I \oplus U$$
+
+| $I$ | $U$ | Decision | Flag |
+|---|---|---|---|
+| 0 | 0 | ROUTINE | no |
+| 1 | 0 | REFER | yes |
+| 0 | 1 | REFER | yes |
+| 1 | 1 | REFER | no |
+
+### Example record (invented patient; CNIC, phone and MRN masked before extraction)
+
+```json
+{
+  "image": "e4f12411fd85.png",
+  "image_probabilities": {"non_referable": 0.001, "referable_DR": 0.999},
+  "note_masked": "Patient Adeel Hussain, aged 46, type 2 diabetes for 12 years, has had blurred vision for 3 weeks with floaters in the OD and one sudden dark spot on 10/11/2026. Fundus photograph shows DR grade 4. HbA1c 9.4%. Referred from Mayo Hospital Lahore. [MRN]. CNIC [CNIC], family mobile [PHONE].",
+  "text_evidence": {
+    "entities": [["Adeel Hussain","PERSON"],["46","DATE"],["2","CARDINAL"],["12 years","DATE"],
+                 ["3 weeks","DATE"],["OD","ORG"],["one","CARDINAL"],["10/11/2026","DATE"],
+                 ["DR","GPE"],["4","CARDINAL"],["HbA1c 9.4%","PERCENT"],["Mayo Hospital","ORG"],
+                 ["Lahore","GPE"],["CNIC","ORG"],["CNIC","ORG"]],
+    "fields": {"date": ["10/11/2026"], "hba1c": ["9.4"], "eye": ["OD"], "dr_grade": ["4"], "age": ["46"]},
+    "urgent_terms": ["blurred vision", "floater", "dark spot"]
+  },
+  "decision": "REFER",
+  "reasons": ["image model: P(referable_DR) = 1.00",
+              "note mentions: blurred vision, floater, dark spot"],
+  "flags": [],
+  "disclaimer": "Decision support only; a qualified human decides."
+}
+```
+
+**Reading it.** $p = 0.999 \ge 0.464$ (margin $0.535$) so $I = 1$; three urgent terms so $U = 1$; REFER, flag $= 1 \oplus 1 = 0$. No `cnic`, `mobile` or `mrn` field exists because those values were masked first.
+
+### When the sources disagree
+
+| Case | $P(\text{referable\_DR})$ | $I$ | Urgent terms | $U$ | Decision | Flag |
+|---|---|---|---|---|---|---|
+| A: grade-0 photo + urgent note | 0.055 (below $t$ by 0.409) | 0 | blurred vision, floater, vision loss | 1 | REFER | **yes** |
+| B: grade-4 photo + routine note | 0.999 (above $t$ by 0.535) | 1 | none | 0 | REFER | **yes** |
+
+Missing referable retinopathy costs far more than an extra review, so either source alone refers the case and the disagreement is flagged for a human; neither source is silently dropped.
+
+### Entity quality of the record
+
+Against my own gold list for the note (6 entities: person, hospital, city, two durations, one date): spaCy returned 15 entities and found all 6, so $R = 6/6 = 1.00$, $P = 6/15 = 0.40$, $F1 = \frac{2 \times 6}{15 + 6} = 0.571$. Of the 9 extra entities, 5 are harmless number-like labels (`46`, `2`, `one`, `4`, `HbA1c 9.4%`) and 4 are wrong as data (`OD` as `ORG`, `DR` as `GPE`, `CNIC` as `ORG` twice): $4/15 = 26.7\,\%$.
+
+---
+
+## 6. Privacy
+
+`mask_pii` replaces CNIC -> `[CNIC]`, mobile -> `[PHONE]`, e-mail -> `[EMAIL]`, MRN -> `[MRN]` **before** any extraction, logging or JSON output. Reason: extraction copies text into new places (entities, fields, JSON, logs); the field extractor returns the matched text itself (`MRN 4471823`, the full CNIC), so masking afterwards cannot recall what was already copied.
+
+| Check | Result |
+|---|---|
+| `CNIC 35202-1234567-1, call 0300-1234567, a@b.pk, MRN 4471823` | `CNIC [CNIC], call [PHONE], [EMAIL], [MRN]` (4 of 4 removed) |
+| Leak check on the JSON record (full CNIC, phone, MRN and the two digit runs `35202`, `1234567`) | **0 of 5 fragments found** |
+
+**Known gaps (not fixed in this notebook):**
+
+* The patient's **name** is not masked: it remains in `note_masked` and in the entities, so the record is not fully de-identified.
+* The label word *CNIC* stays in the text and spaCy tags it as `ORG` twice (see example).
+* The leak check only tests the five listed fragments.
+
+---
+
+## Limitations
+
+* **Example photos.** In this run they were taken from the mirror's `test.csv`, not from the Week 6 `splits.csv` test split. Week 6 re-split all images, so they may have been in training, and $0.999$ may be optimistic. Week 6 itself has no patient id and its test split was unbalanced ($367/506 = 72.5\,\%$ referable), so its PPV does not carry to a clinic.
+* **Spam.** One split, one seed; the word/character gap is 4 messages. Roman Urdu was never trained on. 5 of the 13 errors are ambiguous or label errors.
+* **NER.** 38 gold entities in total; the held-out set barely tests the organisation rules.
+* **OCR.** The only full-image test is a clean synthetic invoice; `fix_ocr` does not repair adjacent look-alike letters.
+
+## Reproducing
+
+Run the notebook top to bottom on Kaggle with the inputs above attached (`spam.csv`, APTOS photos, `aptos_model.pt`; `splits.csv` from Week 6 if available, otherwise the mirror's `test.csv` is used and the notebook prints that). Internet is needed for the first EasyOCR run. Seeds: `random_state=42` for the spam split.
