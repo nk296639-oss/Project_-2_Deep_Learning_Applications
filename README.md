@@ -451,7 +451,6 @@ The figure uses one correct prediction per DR grade plus 4 random errors (9 imag
 
 Fixed settings: `SEED = 42`, `IMG_SIZE = 224`, `CACHE_SIZE = 256`, `NEAR_DUP_THR = 0.10`, `TARGET_RECALL = 0.95`, `REFERABLE_MIN_GRADE = 2`. The operating threshold **t = 0.464 is not stored in the checkpoint**; record it separately before any use.
 
-
 # Week 7: Text and Multimodal AI
 
 Text tools (spam classifier, named-entity recognition, regular-expression fields, OCR, privacy masking) connected to my **Week 6 image model** (APTOS 2019 fundus photos, referable diabetic retinopathy) in one decision-support record.
@@ -566,7 +565,7 @@ Error rate $13/1115 = 1.17\,\%$; counting only the 8 model errors, $8/1115 = 0.7
 
 Scoring is by exact match of text **and** label:
 
-$$P = \frac{TP}{TP + FP}, \quad R = \frac{TP}{TP + FN}, \quad F1 = \frac{2\,TP}{\#\text{predicted} + \#\text{gold}}$$
+$$P = \frac{TP}{TP + FP}, \quad R = \frac{TP}{TP + FN}, \quad F1 = \frac{2\,TP}{\text{predicted} + \text{gold}}$$
 
 | Test set | Gold | Out of the box (P / R / F1) | With entity ruler (P / R / F1) |
 |---|---|---|---|
@@ -702,7 +701,7 @@ $$\text{REFER} = I \lor U, \qquad \text{FLAG for human review} = I \oplus U$$
 
 ### When the sources disagree
 
-| Case | $P(\text{referable\_DR})$ | $I$ | Urgent terms | $U$ | Decision | Flag |
+| Case | $P(\text{referable DR})$ | $I$ | Urgent terms | $U$ | Decision | Flag |
 |---|---|---|---|---|---|---|
 | A: grade-0 photo + urgent note | 0.055 (below $t$ by 0.409) | 0 | blurred vision, floater, vision loss | 1 | REFER | **yes** |
 | B: grade-4 photo + routine note | 0.999 (above $t$ by 0.535) | 1 | none | 0 | REFER | **yes** |
